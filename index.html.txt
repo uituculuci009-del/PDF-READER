@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Editor PDF Mobil</title>
+    <!-- PDF.js pentru citirea documentului -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <!-- jsPDF pentru salvarea documentului final -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 0; background: #2c2c2c; color: white; touch-action: none; overflow: hidden; }
+        
+        /* Bara de sus - Încărcare și Navigare */
+        .top-bar { background: #1e1e1e; padding: 10px; display: flex; gap: 10px; align-items: center; justify-content: center; flex-wrap: wrap; border-bottom: 1px solid #444; }
+        .top-bar input[type="file"] { display: none; }
+        .top-bar label { background: #4CAF50; padding: 8px 12px; border-radius: 5px; cursor: pointer; font-weight: bold; font-size: 14px;}
+        
+        /* Bara de instrumente - Zoom, Creion, Text, Salvare */
+        .toolbar { background: #333; padding: 10px; display: flex; gap: 8px; justify-content: center; border-bottom: 1px solid #444; flex-wrap: wrap;}
+        button { background: #555; color: white; border: none; padding: 8px 12px; border-radius: 5px; font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 5px;}
+        button.active { background: #2196F3; }
+        button.danger { background: #f44336; }
+        button.success { background: #4CAF50; }
+        
+        /* Zona de afișare PDF */
+        .viewer { position: relative; margin: 0 auto; overflow: auto; width: 100%; height: calc(100vh - 120px); display: flex; flex-direction: column; align-items: center; padding: 10px; box-sizing: border-box; }
+        
+        #canvas-wrapper { position: relative; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+        #pdf-canvas { display: block; background: white; }
+        #drawing-canvas { position: absolute; top: 0; left: 0; z-index: 10; }
+        
+        /* Panou pentru introducerea textului */
+        #text-input-container { display: none; position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background: #333; padding: 15px; border-radius: 8px; width: 80%; max-width: 400px; z-index: 100; box-shadow: 0 10px 20px rgba(0,0,0,0.5); border: 1px solid #555;}
+        #text-input-container input { width: 100%; padding: 10px; margin-bottom: 10px; border-radius: 4px; border: none; box-sizing: border-box; font-size: 16px;}
+    </style>
+</head>
+<body>
+
+    <!-- Bara de sus: Upload si paginare -->
+    <div class="top-bar">
+        <label for="pdf-upload">Încarcă PDF</label>
+        <input type="file" id="pdf-upload" accept="application/pdf">
+        
+        <div id="nav-controls" style="display: none; gap: 10px; align-items: center;">
+            <button id="btn-prev">◀</button>
+            <span id="page-info">1 / 1</span>
+            <button id="btn-next">▶</button>
+        </div>
+    </div>
+
+    <!-- Bara de instrumente -->
+    <div class="toolbar" id="toolbar" style="display: none;">
+        <button id="btn-zoom-out">➖</button>
+        <button id="btn-zoom-in">➕</button>
+        <button id="btn-tool-draw" class="active">✏️ Creion</button>
+        <button id="btn-tool-erase">🧽 Radieră</button>
+        <button id="btn-tool-text">🔤 Text</button>
+        <button id="btn-save" class="success">💾 Salvează PDF</button>
+    </div>
+
+    <!-- Zona de lucru -->
+    <div class="viewer" id="viewer">
+        <div id="canvas-wrapper" style="display: none;">
+            <canvas id="pdf-canvas"></canvas>
+            <canvas id="drawing-canvas"></canvas>
+        </div>
+    </div>
+
+    <!-- Input pentru Text -->
+    <div id="text-input-container">
+        <input type="text" id="text-input" placeholder="Scrie textul aici...">
+        <div style="display: flex; gap: 10px; justify-content: flex-end;">
+            <button id="btn-text-cancel" class="danger">Anulează</button>
+            <button id="btn-text-add" class="success">Adaugă</button>
+        </div>
+    </div>
+
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        let pdfDoc = null;
+        let currentPage = 1;
+        let scale = 1.2;
+        let currentTool = 'draw';
+        let isDrawing = false;
+        let lastX = 0;
+        let lastY = 0;
+        let textPosition = { x: 50, y: 50 };
+
+        const pdfCanvas = document.getElementById('pdf-canvas');
+        const drawCanvas = document.getElementById('drawing-canvas');
+        const pdfCtx = pdfCanvas.getContext('2d');
+        const drawCtx = drawCanvas.getContext('2d');
+
+        // 1. Încărcarea documentului
+        document.getElementById('pdf-upload').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const fileReader = new FileReader();
+            fileReader.onload = async function() {
+                const typedarray = new Uint8Array(this.result);
+                pdfDoc = await pdfjsLib.getDocument(typedarray).promise;
+                
+                document.getElementById('nav-controls').style.display = 'flex';
+                document.getElementById('toolbar').style.display = 'flex';
+                document.getElementById('canvas-wrapper').style.display = 'block';
+                
+                currentPage = 1;
+                renderPage(currentPage);
+            };
+            fileReader.readAsArrayBuffer(file);
+        });
+
+        // 2. Randarea paginii
+        async function renderPage(num) {
+            const page = await pdfDoc.getPage(num);
+            const viewport = page.getViewport({ scale: scale });
+
+            pdfCanvas.width = viewport.width;
+            pdfCanvas.height = viewport.height;
+            drawCanvas.width = viewport.width;
+            drawCanvas.height = viewport.height;
+
+            drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+
+            const renderContext = { canvasContext: pdfCtx, viewport: viewport };
+            await page.render(renderContext).promise;
+            
+            document.getElementById('page-info').innerText = `${num} / ${pdfDoc.numPages}`;
+        }
+
+        // 3. Navigare
+        document.getElementById('btn-prev').addEventListener('click', () => {
+            if (currentPage <= 1) return;
+            currentPage--;
+            renderPage(currentPage);
+        });
+
+        document.getElementById('btn-next').addEventListener('click', () => {
+            if (currentPage >= pdfDoc.numPages) return;
+            currentPage++;
+            renderPage(currentPage);
+        });
+
+        // 4. Zoom
+        document.getElementById('btn-zoom-in').addEventListener('click', () => {
+            scale += 0.2;
+            renderPage(currentPage);
+        });
+        document.getElementById('btn-zoom-out').addEventListener('click', () => {
+            if (scale > 0.5) scale -= 0.2;
+            renderPage(currentPage);
+        });
+
+        // 5. Instrumente
+        document.getElementById('btn-tool-draw').addEventListener('click', () => {
+            currentTool = 'draw';
+            setActiveTool('btn-tool-draw');
+        });
+
+        document.getElementById('btn-tool-erase').addEventListener('click', () => {
+            currentTool = 'erase';
+            setActiveTool('btn-tool-erase');
+        });
+
+        document.getElementById('btn-tool-text').addEventListener('click', () => {
+            currentTool = 'text';
+            setActiveTool('btn-tool-text');
+            document.getElementById('text-input-container').style.display = 'block';
+        });
+
+        function setActiveTool(toolId) {
+            ['btn-tool-draw', 'btn-tool-erase', 'btn-tool-text'].forEach(id => {
+                document.getElementById(id).classList.remove('active');
+            });
+            document.getElementById(toolId).classList.add('active');
+            document.getElementById('text-input-container').style.display = 'none';
+        }
+
+        // 6. Logica de desenare
+        function getCoords(e) {
+            const rect = drawCanvas.getBoundingClientRect();
+            let clientX = e.clientX;
+            let clientY = e.clientY;
+            if (e.touches && e.touches.length > 0) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            }
+            return { x: clientX - rect.left, y: clientY - rect.top };
+        }
+
+        function startAction(e) {
+            if (currentTool === 'text') {
+                const coords = getCoords(e);
+                textPosition = coords;
+                document.getElementById('text-input-container').style.display = 'block';
+                document.getElementById('text-input').focus();
+                return;
+            }
+
+            isDrawing = true;
+            const coords = getCoords(e);
+            lastX = coords.x;
+            lastY = coords.y;
+            drawCtx.beginPath();
+            drawCtx.moveTo(lastX, lastY);
+            
+            drawCtx.globalCompositeOperation = currentTool === 'erase' ? 'destination-out' : 'source-over';
+            drawCtx.lineWidth = currentTool === 'erase' ? 20 : 3;
+            drawCtx.lineCap = 'round';
+            drawCtx.strokeStyle = currentTool === 'erase' ? 'rgba(0,0,0,1)' : 'red';
+        }
+
+        function drawAction(e) {
+            if (!isDrawing) return;
+            e.preventDefault();
+            const coords = getCoords(e);
+            drawCtx.lineTo(coords.x, coords.y);
+            drawCtx.stroke();
+        }
+
+        function stopAction() {
+            isDrawing = false;
+            drawCtx.closePath();
+        }
+
+        drawCanvas.addEventListener('mousedown', startAction);
+        drawCanvas.addEventListener('mousemove', drawAction);
+        drawCanvas.addEventListener('mouseup', stopAction);
+        drawCanvas.addEventListener('mouseout', stopAction);
+
+        drawCanvas.addEventListener('touchstart', startAction, {passive: false});
+        drawCanvas.addEventListener('touchmove', drawAction, {passive: false});
+        drawCanvas.addEventListener('touchend', stopAction);
+
+        // 7. Adăugare text
+        document.getElementById('btn-text-cancel').addEventListener('click', () => {
+            document.getElementById('text-input-container').style.display = 'none';
+        });
+
+        document.getElementById('btn-text-add').addEventListener('click', () => {
+            const text = document.getElementById('text-input').value;
+            if (text) {
+                drawCtx.globalCompositeOperation = 'source-over';
+                drawCtx.font = "bold 16px Arial";
+                drawCtx.fillStyle = "black";
+                drawCtx.fillText(text, textPosition.x, textPosition.y);
+                document.getElementById('text-input').value = '';
+                document.getElementById('text-input-container').style.display = 'none';
+            }
+        });
+
+        // 8. Salvare PDF
+        document.getElementById('btn-save').addEventListener('click', async () => {
+            if (!pdfCanvas.width) return;
+
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = pdfCanvas.width;
+            tempCanvas.height = pdfCanvas.height;
+            const tempCtx = tempCanvas.getContext('2d');
+
+            tempCtx.drawImage(pdfCanvas, 0, 0);
+            tempCtx.drawImage(drawCanvas, 0, 0);
+
+            const { jsPDF } = window.jspdf;
+            const pdf = new jsPDF({
+                orientation: tempCanvas.width > tempCanvas.height ? 'l' : 'p',
+                unit: 'px',
+                format: [tempCanvas.width, tempCanvas.height]
+            });
+            
+            pdf.addImage(tempCanvas.toDataURL('image/jpeg', 0.9), 'JPEG', 0, 0, tempCanvas.width, tempCanvas.height);
+            pdf.save(`document_editat_pag_${currentPage}.pdf`);
+        });
+    </script>
+</body>
+</html>
